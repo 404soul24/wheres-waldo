@@ -66,8 +66,29 @@ export function visitor(baseUrl: string, pool: pg.Pool) {
     return guess({ name, x, y, ...extra });
   };
 
-  return { start, playAgain, guess, find };
+  /**
+   * The leaderboard, as this visitor sees it: their own row marked, whether or
+   * not their time made the cut.
+   */
+  const board = async () => {
+    const res = await fetch(`${baseUrl}/api/leaderboard`, {
+      headers: cookie ? { cookie } : {},
+    });
+    return { res, body: (await res.json()) as Leaderboard };
+  };
+
+  return { start, playAgain, guess, find, board };
 }
+
+export type Leaderboard = {
+  entries: {
+    session: string;
+    elapsedMs: number;
+    finishedAt: string;
+    you: boolean;
+  }[];
+  yours: { elapsedMs: number } | null;
+};
 
 /** The middle of a character's seeded target box: a guess that must land. */
 export async function centreOf(

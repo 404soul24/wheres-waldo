@@ -18,6 +18,14 @@ type CharacterRow = {
   found: boolean;
 };
 
+type LeaderboardRow = {
+  session_id: string;
+  elapsed_ms: number;
+  finished_at: Date;
+};
+
+type YourRow = { elapsed_ms: number };
+
 /** Every Character, with whether this round has found it. Where none are is
  * never sent: the target boxes stay on the server. */
 async function characters(
@@ -85,6 +93,33 @@ const RESUME_OR_NEW = `WITH newest AS (
   UNION ALL
   SELECT * FROM newest
   LIMIT 1`;
+
+/**
+ * The ten fastest finished rounds, one row per session on its best score.
+ *
+ * DISTINCT ON picks the best round of each session — a player who plays twenty
+ * times is one entry on a board, not twenty — and the outer ORDER BY puts those
+ * sessions in score order afterwards. Only rounds with both a finish and a
+ * score are ranked, so an abandoned round never appears. A session is named by
+ * its own opaque id and nothing else: the table holds no name, no address and
+ * nothing about who anyone is.
+ */
+const LEADERBOARD = `SELECT session_id, elapsed_ms, finished_at FROM (
+    SELECT DISTINCT ON (session_id) session_id, elapsed_ms, finished_at
+      FROM rounds
+     WHERE finished_at IS NOT NULL AND elapsed_ms IS NOT NULL
+     ORDER BY session_id, elapsed_ms, finished_at
+  ) AS best
+  ORDER BY elapsed_ms, finished_at
+  LIMIT 10`;
+
+/** The one score this session would be judged by, ranked or not — the same
+ *  best-of rule the board uses, so the two can never disagree. */
+const YOUR_SCORE = `SELECT elapsed_ms
+  FROM rounds
+ WHERE session_id = $1 AND finished_at IS NOT NULL AND elapsed_ms IS NOT NULL
+ ORDER BY elapsed_ms, finished_at
+ LIMIT 1`;
 
 /**
  * Finish the round if the last character has just been found, and return it.
@@ -217,6 +252,27 @@ export function createApp(pool: pg.Pool) {
       hit,
       characters: await characters(pool, round.id),
       round: asRound(finished[0] ?? round),
+    });
+  });
+
+  // A GET, and so readable by anyone with no session at all: the board is the
+  // public record of every score, and asking for it never invents a session.
+  app.get("/api/leaderboard", async (req, res) => {
+    const sessionId = claimedSession(req);
+    const { rows } = await pool.query<LeaderboardRow>(LEADERBOARD);
+    const mine = sessionId
+      ? await pool.query<YourRow>(YOUR_SCORE, [sessionId])
+      : { rows: [] };
+
+    const yours = mine.rows[0];
+    res.json({
+      entries: rows.map((row) => ({
+        session: row.session_id,
+        elapsedMs: row.elapsed_ms,
+        finishedAt: row.finished_at.toISOString(),
+        you: row.session_id === sessionId,
+      })),
+      yours: yours ? { elapsedMs: yours.elapsed_ms } : null,
     });
   });
 

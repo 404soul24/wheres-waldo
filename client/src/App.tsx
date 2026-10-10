@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 
+import { boardNote, formatElapsed } from "./leaderboard.ts";
+import type { Board } from "./leaderboard.ts";
 import { readMarkers, writeMarkers } from "./markers.ts";
 import type { Markers } from "./markers.ts";
 import { pickerPosition } from "./picker-position.ts";
@@ -89,6 +91,14 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
   const [drawn, setDrawn] = useState<Drawn | null>(null);
+  // Which of the two screens is up. The board is reachable from anywhere and
+  // does not need a finished round to be worth looking at, so it is a screen
+  // rather than a thing the score dialog owns.
+  const [view, setView] = useState<"play" | "board">("play");
+  const [board, setBoard] = useState<Board | null>(null);
+  // The board's own failure, not the app's: a leaderboard that will not load is
+  // no reason to throw away a round already under way.
+  const [boardError, setBoardError] = useState<string | null>(null);
 
   const list = useRef<HTMLElement>(null);
   const area = useRef<HTMLDivElement>(null);
@@ -113,6 +123,20 @@ export default function App() {
       .then(adopt)
       .catch(() => setError("We could not start your round. Please reload."));
   }, [adopt]);
+
+  // Asked for each time the board is opened, so it is the record as it stands
+  // rather than as it stood when the round ended. The error is cleared by the
+  // button that opens the board, not here: an effect that clears state it is
+  // about to set anyway just costs a second render.
+  useEffect(() => {
+    if (view !== "board") return;
+    fetch("/api/leaderboard")
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .then((body: Board) => setBoard(body))
+      .catch(() =>
+        setBoardError("We could not load the leaderboard. Please try again."),
+      );
+  }, [view]);
 
   // A Marker stays for the rest of the round, and the round outlives a reload:
   // the server hands back the same round, already part-found. The server keeps
@@ -279,6 +303,16 @@ export default function App() {
         >
           {zoom === 1 ? "Zoom in (2x)" : "Zoom out (1x)"}
         </button>
+        <button
+          type="button"
+          className="rounded border border-neutral-700 px-3 py-1 focus-visible:outline-2 focus-visible:outline-offset-2"
+          onClick={() => {
+            setBoardError(null);
+            setView(view === "board" ? "play" : "board");
+          }}
+        >
+          {view === "board" ? "Back to the picture" : "Leaderboard"}
+        </button>
         <span className="ml-auto tabular-nums" aria-label="Time since the round started">
           {formatElapsed(elapsed)}
         </span>
@@ -292,6 +326,9 @@ export default function App() {
         {failed}
       </p>
 
+      {view === "board" ? (
+        <Leaderboard board={board} error={boardError} />
+      ) : (
       <main className="flex min-h-0 flex-1">
         <aside ref={list} className="w-48 shrink-0 overflow-y-auto border-r border-neutral-800 p-4">
           <ul className="list-none space-y-2">
@@ -360,8 +397,9 @@ export default function App() {
           </div>
         )}
       </main>
+      )}
 
-      {round.finishedAt && (
+      {round.finishedAt && view === "play" && (
         // Shown when the round ends, and again on any return to a round that is
         // already over, because the score belongs to the round rather than to
         // the moment it happened.
@@ -387,6 +425,16 @@ export default function App() {
               className="w-full rounded bg-sky-600 px-3 py-2 font-bold hover:bg-sky-500 disabled:opacity-50"
             >
               {busy ? "Starting…" : "Play again"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setBoardError(null);
+                setView("board");
+              }}
+              className="mt-2 w-full rounded border border-neutral-600 px-3 py-2 text-sm hover:border-neutral-400"
+            >
+              See the leaderboard
             </button>
           </div>
         </div>
@@ -423,6 +471,64 @@ export default function App() {
     if (zoom === 2) setPan({ x: 0, y: 0 });
     setZoom(zoom === 1 ? 2 : 1);
   }
+}
+
+/**
+ * The ten fastest rounds anyone has finished, one row per session on its best
+ * score, and the player's own row picked out. Rows are named by an opaque
+ * handle and nothing else, so there is nothing here to identify anyone by.
+ */
+function Leaderboard({
+  board,
+  error,
+}: {
+  board: Board | null;
+  error: string | null;
+}) {
+  if (error) return <p role="alert" className="p-8 text-red-400">{error}</p>;
+  if (!board) return <p className="p-8">Loading the leaderboard…</p>;
+  const note = boardNote(board);
+
+  return (
+    <main className="min-h-0 flex-1 overflow-y-auto p-4">
+      <h2 className="text-lg font-bold">The ten fastest rounds</h2>
+      {note && <p className="mt-2 text-sm text-neutral-400">{note}</p>}
+      {board.entries.length > 0 && (
+        <table className="mt-4 w-full max-w-lg text-sm">
+          <thead>
+            <tr className="text-left text-neutral-400">
+              <th className="py-1 pr-4 font-normal">#</th>
+              <th className="py-1 pr-4 font-normal">Time</th>
+              <th className="py-1 font-normal">Finished</th>
+            </tr>
+          </thead>
+          <tbody>
+            {board.entries.map((entry, index) => (
+              <tr
+                key={entry.session}
+                // Told apart by a word as well as a colour, so the player's own
+                // row is findable without reading the colour.
+                className={
+                  entry.you
+                    ? "bg-sky-950 font-bold text-sky-200"
+                    : "border-t border-neutral-800"
+                }
+              >
+                <td className="py-1 pr-4 tabular-nums">
+                  {index + 1}
+                  {entry.you && <span className="ml-2 text-xs">You</span>}
+                </td>
+                <td className="py-1 pr-4 tabular-nums">{formatElapsed(entry.elapsedMs)}</td>
+                <td className="py-1 tabular-nums">
+                  {new Date(entry.finishedAt).toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </main>
+  );
 }
 
 function Picture({
@@ -608,7 +714,4 @@ function useElapsed(round: Round | null): number {
   return Math.max(0, now - Date.parse(round.startedAt));
 }
 
-function formatElapsed(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-}
+
