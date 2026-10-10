@@ -9,8 +9,19 @@ import { pointOnPicture } from "./point-on-picture.ts";
 import type { Point, RenderedPicture } from "./point-on-picture.ts";
 
 type Character = { name: string; found: boolean };
-type Round = { id: string; startedAt: string; finishedAt: string | null };
-type GuessResponse = { hit: boolean; characters: Character[]; error?: string };
+type Round = {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  elapsedMs: number | null;
+};
+type GuessResponse = {
+  hit: boolean;
+  characters: Character[];
+  round?: Round;
+  error?: string;
+};
+type StartResponse = { round: Round; characters: Character[] };
 
 /**
  * Where the cursor is over the picture: the point it names, as a fraction of
@@ -48,6 +59,22 @@ function middleAt(drawn: Drawn | null): ScreenPoint {
     : { x: 0, y: 0 };
 }
 
+/**
+ * The round this session is playing. Arriving at the page and asking for
+ * another round are the same request, told apart by what the player meant:
+ * without `again` the server hands back the round already under way, and with
+ * it a new one, started now, with nothing found.
+ */
+async function fetchRound(again: boolean): Promise<StartResponse> {
+  const response = await fetch("/api/rounds", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(again ? { restart: true } : {}),
+  });
+  if (!response.ok) throw new Error();
+  return response.json() as Promise<StartResponse>;
+}
+
 export default function App() {
   const [round, setRound] = useState<Round | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -74,19 +101,18 @@ export default function App() {
   // Resuming is the same request as starting: the server returns the round this
   // session already has, started when it first arrived, found characters and
   // all. Nothing here keeps a start time of its own (ADR-0001).
-  useEffect(() => {
-    fetch("/api/rounds", { method: "POST" })
-      .then((response) => {
-        if (!response.ok) throw new Error();
-        return response.json() as Promise<{ round: Round; characters: Character[] }>;
-      })
-      .then(({ round, characters }) => {
-        setRound(round);
-        setCharacters(characters);
-        setMarkers(readMarkers(round.id));
-      })
-      .catch(() => setError("We could not start your round. Please reload."));
+  const adopt = useCallback((next: StartResponse) => {
+    setRound(next.round);
+    setCharacters(next.characters);
+    // Markers are keyed by round, so a new round reads none and starts clean.
+    setMarkers(readMarkers(next.round.id));
   }, []);
+
+  useEffect(() => {
+    fetchRound(false)
+      .then(adopt)
+      .catch(() => setError("We could not start your round. Please reload."));
+  }, [adopt]);
 
   // A Marker stays for the rest of the round, and the round outlives a reload:
   // the server hands back the same round, already part-found. The server keeps
@@ -189,6 +215,10 @@ export default function App() {
       // from what this Guess hoped for. A Hit for a Character already found is
       // a no-op, so it must not move or add a Marker either.
       setCharacters(body.characters);
+      // The round comes back on every answer, because the answer that finds the
+      // last Character is the answer that ends the round. Its score is the
+      // server's, taken as it stands (ADR-0001).
+      setRound((current) => body.round ?? current);
       if (body.hit && !alreadyFound) {
         setMarkers((marks) => ({ ...marks, [name]: point }));
         setFound(`Found ${name}!`);
@@ -208,6 +238,35 @@ export default function App() {
   if (!round) return <p className="p-8">Loading the picture…</p>;
 
   const remaining = characters.filter((c) => !c.found);
+  // The score, exactly as the server recorded it and no other way: whatever the
+  // tick on this screen believed a moment ago, this is the number that was
+  // written down (ADR-0001).
+  const score = formatElapsed(round.elapsedMs ?? 0);
+
+  /**
+   * Starting again is the same request that loaded the page, saying so: the
+   * server hands back a round with nothing found, a clock of its own, and the
+   * same six characters. Markers, list and clock all follow from its id.
+   */
+  async function playAgain() {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    // Everything the last round said about itself goes with it: the list, the
+    // markers and the clock all follow from the round the server hands back,
+    // and the banners are the only things left to clear by hand.
+    setFailed(null);
+    setFound(null);
+    setChosen(null);
+    try {
+      await adopt(await fetchRound(true));
+    } catch {
+      setFailed("We could not start a new round. Please try again.");
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="flex h-svh flex-col bg-neutral-950 text-neutral-100">
@@ -301,6 +360,37 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {round.finishedAt && (
+        // Shown when the round ends, and again on any return to a round that is
+        // already over, because the score belongs to the round rather than to
+        // the moment it happened.
+        <div className="fixed inset-0 z-20 grid place-items-center bg-neutral-950/80">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="score-heading"
+            className="w-80 rounded border border-neutral-600 bg-neutral-900 p-6 text-center shadow-xl"
+          >
+            <h2 id="score-heading" className="text-lg font-bold">
+              All six found
+            </h2>
+            <p className="mt-1 text-sm text-neutral-400">You took</p>
+            <p className="my-2 text-4xl tabular-nums" aria-label={`Time taken ${score}`}>
+              {score}
+            </p>
+            <button
+              type="button"
+              autoFocus
+              disabled={busy}
+              onClick={() => void playAgain()}
+              className="w-full rounded bg-sky-600 px-3 py-2 font-bold hover:bg-sky-500 disabled:opacity-50"
+            >
+              {busy ? "Starting…" : "Play again"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -500,6 +590,9 @@ function onPicture(
  * set. The tick only decides how often the display is refreshed; the number
  * itself is the difference of two absolute times, so a hidden tab, a throttled
  * interval or a sleeping laptop catch up rather than lose seconds (ADR-0001).
+ *
+ * Once the round is over, the server's score is the answer: it is the number
+ * that was recorded, and the client is not trusted to agree with it.
  */
 function useElapsed(round: Round | null): number {
   const [now, setNow] = useState(() => Date.now());
@@ -511,8 +604,8 @@ function useElapsed(round: Round | null): number {
   }, [round]);
 
   if (!round) return 0;
-  const end = round.finishedAt ? Date.parse(round.finishedAt) : now;
-  return Math.max(0, end - Date.parse(round.startedAt));
+  if (round.finishedAt) return round.elapsedMs ?? 0;
+  return Math.max(0, now - Date.parse(round.startedAt));
 }
 
 function formatElapsed(ms: number): string {

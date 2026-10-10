@@ -29,6 +29,14 @@ async function rejectsWithSqlState(
   });
 }
 
+/** A session with no rounds of its own, to hang rounds off. */
+async function newSession(): Promise<string> {
+  const session = await pool.query(
+    "INSERT INTO sessions DEFAULT VALUES RETURNING id",
+  );
+  return session.rows[0]!.id as string;
+}
+
 describe("applying the schema and the characters", () => {
   it("is safe to apply twice, and leaves six characters", async () => {
     await applySchema(pool, true);
@@ -98,15 +106,29 @@ describe("applying the schema and the characters", () => {
     ]);
   });
 
-  it("refuses a second round for the same session", async () => {
-    const session = await pool.query(
-      "INSERT INTO sessions DEFAULT VALUES RETURNING id",
-    );
-    const id = session.rows[0]!.id;
+  it("refuses a second unfinished round for the same session", async () => {
+    const id = await newSession();
+
     await pool.query("INSERT INTO rounds (session_id) VALUES ($1)", [id]);
 
     await rejectsWithSqlState(UNIQUE_VIOLATION, () =>
       pool.query("INSERT INTO rounds (session_id) VALUES ($1)", [id]),
     );
+  });
+
+  it("lets a session play again once its round is finished", async () => {
+    const id = await newSession();
+    await pool.query(
+      "INSERT INTO rounds (session_id, finished_at, elapsed_ms) VALUES ($1, now(), 1000)",
+      [id],
+    );
+
+    await pool.query("INSERT INTO rounds (session_id) VALUES ($1)", [id]);
+
+    const { rows } = await pool.query(
+      "SELECT count(*)::int AS n FROM rounds WHERE session_id = $1",
+      [id],
+    );
+    assert.equal(rows[0]!.n, 2, "a finished round is kept, and does not block another");
   });
 });

@@ -3,14 +3,23 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A session plays more than one round: finishing one offers a new one. What is
+-- unique is the round in progress, and it is the database rather than the
+-- application that says so, for the same reason the old UNIQUE (session_id) did:
+-- two requests arriving together for a session with no live round must produce
+-- one round rather than a race between two.
 CREATE TABLE IF NOT EXISTS rounds (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id  UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at TIMESTAMPTZ,
-  elapsed_ms  INTEGER,
-  UNIQUE (session_id)
+  elapsed_ms  INTEGER
 );
+
+ALTER TABLE rounds DROP CONSTRAINT IF EXISTS rounds_session_id_key;
+
+CREATE UNIQUE INDEX IF NOT EXISTS rounds_one_live_per_session
+  ON rounds (session_id) WHERE finished_at IS NULL;
 
 -- The table is called `targets` because that is the name the spec fixed, but a
 -- row here is a Character; x/y/w/h are its Target box. See GLOSSARY.md.

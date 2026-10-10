@@ -34,6 +34,82 @@ async function characters(
   return rows;
 }
 
+/** A round as the browser is told about it, in the shape it stores. */
+const asRound = (round: RoundRow) => ({
+  id: round.id,
+  startedAt: round.started_at.toISOString(),
+  finishedAt: round.finished_at?.toISOString() ?? null,
+  elapsedMs: round.elapsed_ms,
+});
+
+/**
+ * A brand new round for this session, whatever state the last one is in.
+ *
+ * Nothing here is conditional, because a finished round cannot block the next
+ * one: the partial unique index only covers rounds still under way. A round
+ * still under way does block it, and being handed that round instead is the
+ * right answer — a player who pressed "play again" twice has lost the first
+ * press to the second, not asked to throw away a round they are still playing.
+ */
+const NEW_ROUND = `INSERT INTO rounds (session_id) VALUES ($1)
+  ON CONFLICT (session_id) WHERE finished_at IS NULL
+  DO UPDATE SET session_id = EXCLUDED.session_id
+  RETURNING id, started_at, finished_at, elapsed_ms`;
+
+/**
+ * The round this session is playing: the most recent one it has, or a new one
+ * if it has never played. A finished round is still the session's round — the
+ * player came back to be shown their score, and handing them a fresh clock
+ * instead would throw it away — so only a round that has never existed is
+ * created here.
+ *
+ * One statement, because the two branches read the same snapshot and so cannot
+ * both answer: with a round already there `fresh` produces nothing and the
+ * session's own round comes back; with none, `fresh` inserts it. Two requests
+ * arriving together for a session that has never played cannot both insert one,
+ * because the second waits on the partial index and is handed the round the
+ * first inserted.
+ */
+const RESUME_OR_NEW = `WITH newest AS (
+    SELECT id, started_at, finished_at, elapsed_ms
+      FROM rounds WHERE session_id = $1
+     ORDER BY started_at DESC LIMIT 1
+  ), fresh AS (
+    INSERT INTO rounds (session_id)
+    SELECT $1 WHERE NOT EXISTS (SELECT 1 FROM newest)
+    ON CONFLICT (session_id) WHERE finished_at IS NULL
+    DO UPDATE SET session_id = EXCLUDED.session_id
+    RETURNING id, started_at, finished_at, elapsed_ms
+  )
+  SELECT * FROM fresh
+  UNION ALL
+  SELECT * FROM newest
+  LIMIT 1`;
+
+/**
+ * Finish the round if the last character has just been found, and return it.
+ *
+ * The score is the database's own arithmetic on its own clock: `now()` minus
+ * the round's start, in the same statement that records the end, so the two can
+ * never be measurements of different moments (ADR-0001). The condition is
+ * checked here rather than counted in the request handler, because the row this
+ * UPDATE locks is the round itself: two guesses racing to be the last are
+ * settled by the database, and only the one that finds an unfinished round
+ * records a score.
+ */
+const FINISH_IF_COMPLETE = `UPDATE rounds
+   SET finished_at = now(),
+       elapsed_ms  = (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::int
+ WHERE id = $1
+   AND finished_at IS NULL
+   AND NOT EXISTS (
+     SELECT 1 FROM targets t
+      WHERE NOT EXISTS (
+        SELECT 1 FROM finds f WHERE f.round_id = $1 AND f.target_id = t.id
+      )
+   )
+ RETURNING id, started_at, finished_at, elapsed_ms`;
+
 export function createApp(pool: pg.Pool) {
   const app = express();
   app.use(express.json());
@@ -47,25 +123,32 @@ export function createApp(pool: pg.Pool) {
       [sessionId],
     );
 
-    // A session has at most one round, and the database is what enforces it.
-    // Upserting rather than selecting first is what makes two simultaneous
-    // requests for a brand new session produce one round rather than a clash.
-    const { rows } = await pool.query<RoundRow>(
-      `INSERT INTO rounds (session_id) VALUES ($1)
-         ON CONFLICT (session_id) DO UPDATE SET session_id = EXCLUDED.session_id
-       RETURNING id, started_at, finished_at, elapsed_ms`,
-      [sessionId],
-    );
-    const round = rows[0]!;
+    // The same request resumes a round and starts the next one. What tells them
+  // apart is the player's intent, not the shape of the round: arriving at the
+  // page wants the round already under way, and pressing "play again" wants a
+  // new one. Anything but an exact `true` is not a request to start one.
+  const again =
+    (req.body as { restart?: unknown } | undefined)?.restart === true;
+  const { rows } = await pool.query<RoundRow>(
+    again ? NEW_ROUND : RESUME_OR_NEW,
+    [sessionId],
+  );
+  const round = rows[0]!;
+
+    // A round whose last character has been found is over, even if the request
+    // that found it never got to say so: recording the find and finishing the
+    // round are two statements, and a connection that dies between them would
+    // otherwise leave a round that can never be finished — there is nothing
+    // left to guess at. Settling it here costs one UPDATE that is a no-op for
+    // every round that is not complete.
+    const { rows: settled } = round.finished_at
+      ? { rows: [] }
+      : await pool.query<RoundRow>(FINISH_IF_COMPLETE, [round.id]);
+    const finishedRound = settled[0] ?? round;
 
     res.json({
-      round: {
-        id: round.id,
-        startedAt: round.started_at.toISOString(),
-        finishedAt: round.finished_at?.toISOString() ?? null,
-        elapsedMs: round.elapsed_ms,
-      },
-      characters: await characters(pool, round.id),
+      round: asRound(finishedRound),
+      characters: await characters(pool, finishedRound.id),
     });
   });
 
@@ -77,8 +160,13 @@ export function createApp(pool: pg.Pool) {
     }
 
     const sessionId = claimedSession(req);
+    // The round being guessed at is the live one; a session with none left has
+    // finished every round it has, and the earliest of those answers "over".
     const { rows: rounds } = sessionId
-      ? await pool.query<RoundRow>("SELECT * FROM rounds WHERE session_id = $1", [sessionId])
+      ? await pool.query<RoundRow>(
+          "SELECT * FROM rounds WHERE session_id = $1 ORDER BY finished_at NULLS FIRST LIMIT 1",
+          [sessionId],
+        )
       : { rows: [] };
     const round = rounds[0];
     if (!round) {
@@ -118,8 +206,18 @@ export function createApp(pool: pg.Pool) {
     }
 
     // Every answer reports the whole state, hit or miss alike, so the client
-    // never has to work out what a miss did or a hit did not.
-    res.json({ hit, characters: await characters(pool, round.id) });
+    // never has to work out what a miss did or a hit did not. It carries the
+    // round too: the round that finishes is finished by this very answer, and
+    // the score the player is shown is the one written here (ADR-0001).
+    const { rows: finished } = await pool.query<RoundRow>(FINISH_IF_COMPLETE, [
+      round.id,
+    ]);
+
+    res.json({
+      hit,
+      characters: await characters(pool, round.id),
+      round: asRound(finished[0] ?? round),
+    });
   });
 
   // Express 5 forwards a rejected handler here, so a database that has gone
