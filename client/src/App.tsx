@@ -258,10 +258,14 @@ export default function App() {
     }
   }
 
-  if (error) return <p className="p-8 text-red-400">{error}</p>;
+  if (error) return <p className="p-8 text-alert">{error}</p>;
   if (!round) return <p className="p-8">Loading the picture…</p>;
 
   const remaining = characters.filter((c) => !c.found);
+  // The whole picture at once, twice, or four times over. 4x is what makes the
+  // picture readable on a phone, where the whole thing fits into a strip a
+  // couple of hundred pixels wide.
+  const nextZoom = zoom === 1 ? 2 : zoom === 2 ? 4 : 1;
   // The score, exactly as the server recorded it and no other way: whatever the
   // tick on this screen believed a moment ago, this is the number that was
   // written down (ADR-0001).
@@ -293,19 +297,19 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-svh flex-col bg-neutral-950 text-neutral-100">
-      <header className="flex flex-wrap items-center gap-4 border-b border-neutral-800 px-4 py-2">
-        <h1 className="text-lg font-bold">Where&apos;s Waldo</h1>
+    <div className="flex h-svh flex-col bg-screen text-paper">
+      <header className="flex flex-wrap items-center gap-4 border-b border-beam/40 px-4 py-2">
+        <h1 className="text-lg font-bold text-beam">Where&apos;s Waldo</h1>
         <button
           type="button"
-          className="rounded border border-neutral-700 px-3 py-1 focus-visible:outline-2 focus-visible:outline-offset-2"
+          className="rounded border border-beam/50 px-3 py-1 hover:border-beam hover:text-beam"
           onClick={toggleZoom}
         >
-          {zoom === 1 ? "Zoom in (2x)" : "Zoom out (1x)"}
+          {`Zoom to ${nextZoom}x`}
         </button>
         <button
           type="button"
-          className="rounded border border-neutral-700 px-3 py-1 focus-visible:outline-2 focus-visible:outline-offset-2"
+          className="rounded border border-beam/50 px-3 py-1 hover:border-beam hover:text-beam"
           onClick={() => {
             setBoardError(null);
             setView(view === "board" ? "play" : "board");
@@ -319,19 +323,19 @@ export default function App() {
         <span>{remaining.length} of {characters.length} left</span>
       </header>
 
-      <p role="status" className="px-4 py-1 text-sm text-emerald-300 empty:hidden">
+      <p role="status" className="px-4 py-1 text-sm text-signal empty:hidden">
         {found}
       </p>
-      <p role="alert" className="px-4 py-1 text-sm text-red-400 empty:hidden">
+      <p role="alert" className="px-4 py-1 text-sm text-alert empty:hidden">
         {failed}
       </p>
 
       {view === "board" ? (
         <Leaderboard board={board} error={boardError} />
       ) : (
-      <main className="flex min-h-0 flex-1">
-        <aside ref={list} className="w-48 shrink-0 overflow-y-auto border-r border-neutral-800 p-4">
-          <ul className="list-none space-y-2">
+      <main className="flex min-h-0 flex-1 flex-col sm:flex-row">
+        <aside ref={list} className="w-full shrink-0 overflow-x-auto border-b border-beam/40 p-4 sm:w-48 sm:overflow-y-auto sm:border-b-0 sm:border-r">
+          <ul className="flex list-none gap-4 sm:block sm:space-y-2">
             {characters.map((character) => (
               <li key={character.name}>
                 <button
@@ -340,12 +344,12 @@ export default function App() {
                   // on it does nothing at all rather than asking for a guess.
                   disabled={character.found}
                   onClick={(event) => choose(character.name, event)}
-                  className={`w-full text-left focus-visible:outline-2 ${
+                  className={`w-auto whitespace-nowrap text-left sm:w-full sm:whitespace-normal ${
                     character.found
                       ? "line-through opacity-40"
                       : chosen === character.name
-                        ? "text-sky-300"
-                        : "hover:text-sky-200"
+                        ? "text-beam"
+                        : "hover:text-beam"
                   }`}
                 >
                   {character.name}
@@ -379,18 +383,18 @@ export default function App() {
             ref={picker}
             role="group"
             aria-label={`Confirm a guess for ${chosen}`}
-            className="fixed z-10 w-52 rounded border border-neutral-600 bg-neutral-900 p-3 shadow-xl"
+            className="fixed z-10 w-52 rounded border border-beam/60 bg-screen p-3 shadow-xl"
             style={{ left: placed.x, top: placed.y }}
           >
             <p className="text-sm font-bold">{chosen}</p>
-            <p className="mt-1 text-xs text-neutral-400">
+            <p className="mt-1 text-xs text-beam/70">
               at {(point.x * 100).toFixed(1)}% across, {(point.y * 100).toFixed(1)}% down
             </p>
             <button
               type="button"
               disabled={busy}
               onClick={() => void guess(chosen, point)}
-              className="mt-2 w-full rounded bg-sky-600 px-3 py-1 font-bold hover:bg-sky-500 disabled:opacity-50"
+              className="mt-2 w-full rounded bg-beam px-3 py-1 font-bold text-screen hover:bg-paper disabled:opacity-50"
             >
               {busy ? "Guessing…" : "Confirm"}
             </button>
@@ -403,17 +407,17 @@ export default function App() {
         // Shown when the round ends, and again on any return to a round that is
         // already over, because the score belongs to the round rather than to
         // the moment it happened.
-        <div className="fixed inset-0 z-20 grid place-items-center bg-neutral-950/80">
+        <div className="fixed inset-0 z-20 grid place-items-center bg-screen/90 p-4">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="score-heading"
-            className="w-80 rounded border border-neutral-600 bg-neutral-900 p-6 text-center shadow-xl"
+            className="w-80 max-w-full rounded border border-beam bg-screen p-6 text-center shadow-xl"
           >
-            <h2 id="score-heading" className="text-lg font-bold">
+            <h2 id="score-heading" className="text-lg font-bold text-beam">
               All six found
             </h2>
-            <p className="mt-1 text-sm text-neutral-400">You took</p>
+            <p className="mt-1 text-sm text-beam/70">You took</p>
             <p className="my-2 text-4xl tabular-nums" aria-label={`Time taken ${score}`}>
               {score}
             </p>
@@ -422,7 +426,7 @@ export default function App() {
               autoFocus
               disabled={busy}
               onClick={() => void playAgain()}
-              className="w-full rounded bg-sky-600 px-3 py-2 font-bold hover:bg-sky-500 disabled:opacity-50"
+              className="w-full rounded bg-beam px-3 py-2 font-bold text-screen hover:bg-paper disabled:opacity-50"
             >
               {busy ? "Starting…" : "Play again"}
             </button>
@@ -432,13 +436,15 @@ export default function App() {
                 setBoardError(null);
                 setView("board");
               }}
-              className="mt-2 w-full rounded border border-neutral-600 px-3 py-2 text-sm hover:border-neutral-400"
+              className="mt-2 w-full rounded border border-beam/60 px-3 py-2 text-sm hover:border-beam hover:text-beam"
             >
               See the leaderboard
             </button>
           </div>
         </div>
       )}
+
+      <Credit />
     </div>
   );
 
@@ -468,9 +474,31 @@ export default function App() {
   function toggleZoom() {
     // Back to 1x the picture is re-centred: a pan that survived the zoom out
     // would leave it off screen and apparently lost.
-    if (zoom === 2) setPan({ x: 0, y: 0 });
-    setZoom(zoom === 1 ? 2 : 1);
+    if (nextZoom === 1) setPan({ x: 0, y: 0 });
+    setZoom(nextZoom);
   }
+}
+
+/**
+ * The picture is somebody else's work, and the app says so where the player is
+ * rather than in a repository file they will never open. Attribution is not a
+ * licence to redistribute, and the credit says exactly that.
+ */
+function Credit() {
+  return (
+    <footer className="border-t border-beam/40 px-4 py-2 text-sm text-beam">
+      Picture: <span className="font-bold">Robot City</span> by{" "}
+      <a
+        className="underline hover:text-paper"
+        href="https://egorklyuchnyk.com"
+        rel="noreferrer noopener"
+        target="_blank"
+      >
+        Egor Klyuchnyk
+      </a>
+      . Credited, not licensed: this is not a redistribution licence.
+    </footer>
+  );
 }
 
 /**
@@ -485,18 +513,18 @@ function Leaderboard({
   board: Board | null;
   error: string | null;
 }) {
-  if (error) return <p role="alert" className="p-8 text-red-400">{error}</p>;
+  if (error) return <p role="alert" className="p-8 text-alert">{error}</p>;
   if (!board) return <p className="p-8">Loading the leaderboard…</p>;
   const note = boardNote(board);
 
   return (
     <main className="min-h-0 flex-1 overflow-y-auto p-4">
-      <h2 className="text-lg font-bold">The ten fastest rounds</h2>
-      {note && <p className="mt-2 text-sm text-neutral-400">{note}</p>}
+      <h2 className="text-lg font-bold text-beam">The ten fastest rounds</h2>
+      {note && <p className="mt-2 text-sm text-beam/70">{note}</p>}
       {board.entries.length > 0 && (
         <table className="mt-4 w-full max-w-lg text-sm">
           <thead>
-            <tr className="text-left text-neutral-400">
+            <tr className="text-left text-beam/70">
               <th className="py-1 pr-4 font-normal">#</th>
               <th className="py-1 pr-4 font-normal">Time</th>
               <th className="py-1 font-normal">Finished</th>
@@ -510,8 +538,8 @@ function Leaderboard({
                 // row is findable without reading the colour.
                 className={
                   entry.you
-                    ? "bg-sky-950 font-bold text-sky-200"
-                    : "border-t border-neutral-800"
+                    ? "bg-beam/15 font-bold text-beam"
+                    : "border-t border-beam/30"
                 }
               >
                 <td className="py-1 pr-4 tabular-nums">
@@ -586,10 +614,15 @@ function Picture({
     // about how it happens to be rendered.
     <div
       ref={area}
-      className="relative flex min-w-0 flex-1 items-center justify-center overflow-hidden bg-black"
+      className="relative flex min-w-0 flex-1 items-center justify-center overflow-hidden bg-screen"
       style={{
         cursor: zoom === 1 ? "default" : pointer ? "grabbing" : "grab",
-        touchAction: zoom === 1 ? undefined : "none",
+        // Taken away from the picture at every zoom, not only when panning is
+        // possible: without it the browser claims a touch drag for its own
+        // scrolling and cancels the pointer, so a finger cannot pan the picture
+        // at all. The page itself never scrolls — the whole game is one screen —
+        // so nothing is lost by refusing the gesture here.
+        touchAction: "none",
       }}
       onPointerDown={(event) => {
         if (zoom === 1) return;
@@ -613,6 +646,8 @@ function Picture({
         ref={image}
         src="/img/robot-city.jpg"
         alt="Robot City, crowded with figures"
+        // max-* rather than a fixed size, so the picture is scaled down to fit
+        // whatever the viewport is and its own proportions are kept at every one.
         className="max-h-full max-w-full"
         style={{
           // Scaling the picture rather than resizing it keeps it at full
@@ -623,6 +658,11 @@ function Picture({
         onLoad={measure}
         draggable={false}
       />
+
+      {/* The tube's own glass, over the picture and never over the type. Both
+          layers ignore the pointer, so they cost the player no clicks. */}
+      <div className="scanlines pointer-events-none absolute inset-0" aria-hidden="true" />
+      <div className="vignette pointer-events-none absolute inset-0" aria-hidden="true" />
 
       {drawn && (
         // Positioned against the picture's box on the page and not inside the
@@ -641,7 +681,7 @@ function Picture({
             // the player is asked to trust a percentage in a box they are about
             // to click, which is how a guess ends up somewhere nobody pointed.
             <span
-              className="absolute block rounded-full border-2 border-dashed border-sky-300"
+              className="absolute block rounded-full border-2 border-dashed border-signal"
               style={{
                 left: aim.x * drawn.width,
                 top: aim.y * drawn.height,
@@ -657,8 +697,8 @@ function Picture({
               key={name}
               className={`absolute block rounded-full border-4 ${
                 name === flash
-                  ? "animate-ping border-white"
-                  : "border-emerald-400/90"
+                  ? "animate-ping border-paper"
+                  : "border-signal/90"
               }`}
               style={{
                 left: point.x * drawn.width,

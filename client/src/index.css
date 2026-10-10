@@ -1,1 +1,48 @@
 @import "tailwindcss";
+
+/* Self-hosted, so the game asks for no font from anywhere else. The file is
+   already in client/public/fonts. */
+@font-face {
+  font-family: "VT323";
+  src: url("/fonts/vt323-latin-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Robot City on a CRT. The names are deliberately not Tailwind palette names:
+   beam/signal/alert mean one thing each in this app and nothing else. */
+@theme {
+  --font-sans: "VT323", ui-monospace, SFMono-Regular, monospace;
+
+  --color-screen: #0a0c0f; /* the black of the tube */
+  --color-beam: #f9b92f; /* amber, the colour of the picture's own light */
+  --color-paper: #fffcf5; /* what the type is painted in */
+  --color-alert: #d42111; /* red: misses and alerts only */
+  --color-signal: #6ab6f0; /* blue: hits and markers only */
+}
+
+/* The tube's texture, over the picture only. It is pointer-events-none and it
+   never sits under type, so the clock, the list and the score stay crisp. */
+.scanlines {
+  background: repeating-linear-gradient(
+    to bottom,
+    rgb(0 0 0 / 0.3) 0 1px,
+    rgb(0 0 0 / 0) 1px 3px
+  );
+}
+
+/* The curve of the glass: dark at the corners, clear in the middle. */
+.vignette {
+  background: radial-gradient(
+    ellipse at center,
+    rgb(0 0 0 / 0) 55%,
+    rgb(0 0 0 / 0.7) 100%
+  );
+}
+
+/* One visible focus state everywhere, in the amber of the tube. */
+:where(button, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-beam);
+  outline-offset: 2px;
+}
