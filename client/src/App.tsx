@@ -5,7 +5,7 @@ import { boardNote, formatElapsed } from "./leaderboard.ts";
 import type { Board } from "./leaderboard.ts";
 import { readMarkers, writeMarkers } from "./markers.ts";
 import type { Markers } from "./markers.ts";
-import { pickerPosition } from "./picker-position.ts";
+import { anchorOn, pickerPosition } from "./picker-position.ts";
 import type { ScreenPoint } from "./picker-position.ts";
 import { pointOnPicture } from "./point-on-picture.ts";
 import type { Point, RenderedPicture } from "./point-on-picture.ts";
@@ -26,16 +26,12 @@ type GuessResponse = {
 type StartResponse = { round: Round; characters: Character[] };
 
 /**
- * Where the cursor is over the picture: the point it names, as a fraction of
- * the picture (ADR-0002), and the place on the page it is standing.
- */
-type Pointing = { point: Point; at: ScreenPoint };
-
-/**
  * The picture's own box on the page: the very same measurement as
  * RenderedPicture, in the very same pixels, and a DOMRect is one already. Read
- * once and shared, so the aim, the Markers and the picker's anchor can never
- * disagree about where the picture is.
+ * once and shared, so the Markers, the crosshair and the picker's anchor are
+ * all placed against where the picture is now. Only a press reads the box
+ * itself, and rightly so: it must divide by the box as it stands at that
+ * instant, not by one a render ago.
  */
 type Drawn = RenderedPicture;
 
@@ -51,15 +47,8 @@ const MARKER_PX = 56;
  */
 const AIM_PX = 28;
 
-/** The middle of the picture: where a guess points before the cursor has been. */
+/** The middle of the picture: where a guess points before a point has been named. */
 const MIDDLE: Point = { x: 0.5, y: 0.5 };
-
-/** Where the middle of the picture is on the page, for anchoring the picker. */
-function middleAt(drawn: Drawn | null): ScreenPoint {
-  return drawn
-    ? { x: drawn.x + drawn.width / 2, y: drawn.y + drawn.height / 2 }
-    : { x: 0, y: 0 };
-}
 
 /**
  * The round this session is playing. Arriving at the page and asking for
@@ -84,7 +73,6 @@ export default function App() {
   const [failed, setFailed] = useState<string | null>(null);
   const [found, setFound] = useState<string | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
-  const [hover, setHover] = useState<Pointing | null>(null);
   const [markers, setMarkers] = useState<Markers>({});
   const [flash, setFlash] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -149,20 +137,26 @@ export default function App() {
 
   const elapsed = useElapsed(round);
 
-  // A chosen character is the picker. It opens once, where the cursor stood when
-  // the character was chosen, and stays there: a picker that chases the cursor
-  // can never be clicked, because moving towards it moves it away. The Guess it
-  // will make is the last point the cursor named on the Picture, so leaving the
-  // Picture to reach Confirm does not lose the aim. With no cursor yet — a
-  // player arriving by keyboard — the point is the middle of the Picture.
-  const [at, setAt] = useState<ScreenPoint | null>(null);
+  // The point the player has named on the picture by pressing it, if they have.
+  // A press and not a cursor, because a cursor that keeps aiming as it travels
+  // to Confirm ends up aiming at the Confirm rather than at the character. It is
+  // held as a fraction of the picture (ADR-0002), so zooming and panning move
+  // the picture under it without moving the aim off the character. A press with
+  // no character chosen still names its point, so a player can point at a
+  // figure first and name it second; a player naming by keyboard names nothing
+  // at all, and the point is the middle of the picture.
+  const [named, setNamed] = useState<Point | null>(null);
   const [placed, setPlaced] = useState<ScreenPoint>({ x: 0, y: 0 });
-  const point = hover?.point ?? MIDDLE;
+  const point = named ?? MIDDLE;
 
   // The picker is placed against the window, so it has to be placed again
   // whenever the window changes shape under it. Resizing with the picker open
   // would otherwise leave it clipped against an edge it was flipped away from.
-  const anchor = at ?? middleAt(drawn);
+  // It is anchored to the point on the picture as the picture is drawn now, so
+  // it is the same short hop away at every zoom, and it does not chase the
+  // pointer: a picker that moves as the pointer approaches it can never be
+  // pressed.
+  const anchor = drawn ? anchorOn(drawn, point) : { x: 0, y: 0 };
   const anchorX = anchor.x;
   const anchorY = anchor.y;
 
@@ -286,6 +280,9 @@ export default function App() {
     setFailed(null);
     setFound(null);
     setChosen(null);
+    // The last round's point goes with it: the next picture is a different one,
+    // and the same fraction of a different picture is somewhere else entirely.
+    setNamed(null);
     try {
       await adopt(await fetchRound(true));
     } catch {
@@ -343,7 +340,7 @@ export default function App() {
                   // A found character is out of the game, so a stray second click
                   // on it does nothing at all rather than asking for a guess.
                   disabled={character.found}
-                  onClick={(event) => choose(character.name, event)}
+                  onClick={() => choose(character.name)}
                   className={`w-auto whitespace-nowrap text-left sm:w-full sm:whitespace-normal ${
                     character.found
                       ? "line-through opacity-40"
@@ -369,10 +366,9 @@ export default function App() {
           markers={markers}
           flash={flash}
           aim={chosen ? point : null}
-          // Only worth tracking while a character is chosen. Following the
-          // cursor on every move of a picture-sized element re-renders the whole
-          // board for a number nobody is looking at yet.
-          onHover={chosen ? setHover : () => setHover(null)}
+          // A press on the picture is what names a point, so nothing is tracked
+          // on every move of a picture-sized element.
+          onAim={setNamed}
         />
 
         {chosen && (
@@ -448,26 +444,14 @@ export default function App() {
     </div>
   );
 
-  /**
-   * Choosing a character is what opens the picker, and the picker opens where
-   * the cursor is, so the player's eye does not have to travel to find it. A
-   * cursor that has never been over the picture — a player arriving by keyboard
-   * — gets the middle of the picture instead of nothing at all.
+/**
+   * Choosing a character is what opens the picker. It does not touch the point:
+   * the player has already named where they are looking, and choosing a
+   * character afterwards must not throw that away in favour of the middle of
+   * the picture.
    */
-  function choose(name: string, event: { clientX: number; clientY: number }) {
-    // Enter on a button reports a cursor at the origin, which would anchor the
-    // picker in the top left corner: exactly the fixed corner this avoids.
-    const cursor =
-      event.clientX || event.clientY
-        ? { x: event.clientX, y: event.clientY }
-        : middleAt(drawn);
-    setAt(cursor);
+  function choose(name: string) {
     setFound(null);
-    // A character chosen afresh starts from the middle of the picture, not from
-    // wherever the mouse last wandered: the player is naming a character now,
-    // and carrying an old cursor position into the new guess would fire at a
-    // point they never chose.
-    setHover(null);
     setChosen(name);
   }
 
@@ -490,7 +474,7 @@ function Credit() {
       Picture: <span className="font-bold">Robot City</span> by{" "}
       <a
         className="underline hover:text-paper"
-        href="https://egorklyuchnyk.com"
+        href="https://chekavo.artstation.com/"
         rel="noreferrer noopener"
         target="_blank"
       >
@@ -567,7 +551,7 @@ function Picture({
   drawn,
   markers,
   flash,
-  onHover,
+  onAim,
   onDrawn,
   aim,
 }: {
@@ -580,7 +564,8 @@ function Picture({
   drawn: Drawn | null;
   markers: Markers;
   flash: string | null;
-  onHover: (aim: Pointing | null) => void;
+  /** The point a press on the picture named, which becomes the guess. */
+  onAim: (point: Point) => void;
   onDrawn: (drawn: Drawn) => void;
   /** The point Confirm would guess at, drawn on the picture so the player can
    * see it rather than infer it from a percentage. */
@@ -602,10 +587,12 @@ function Picture({
     return () => window.removeEventListener("resize", measure);
   }, [measure]);
 
-  /** Where the cursor is on the picture right now, or null off it. */
-  function aimed(clientX: number, clientY: number): Pointing | null {
-    const point = onPicture(clientX, clientY, image.current);
-    return point ? { point, at: { x: clientX, y: clientY } } : null;
+  /** The point a press names, read off the picture as it stands at that instant.
+   * Null for a press on the black beside the picture, which names nothing
+   * rather than naming the middle: a stray press must not throw the aim away. */
+  function namedAt(clientX: number, clientY: number): Point | null {
+    const box = image.current?.getBoundingClientRect();
+    return box ? pointOnPicture(clientX, clientY, box) : null;
   }
 
   return (
@@ -625,20 +612,25 @@ function Picture({
         touchAction: "none",
       }}
       onPointerDown={(event) => {
+        // A second finger mid-pan neither renames the point nor hijacks the pan.
+        if (pointer) return;
+        // Naming is not tied to the pointer being still: a pan is a drag from a
+        // point on the picture, and that point is a fair one to have named.
+        const pressed = namedAt(event.clientX, event.clientY);
+        if (pressed) onAim(pressed);
         if (zoom === 1) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         setPointer({ x: event.clientX, y: event.clientY });
       }}
       onPointerMove={(event) => {
-        onHover(aimed(event.clientX, event.clientY));
         if (!pointer) return;
         const dx = event.clientX - pointer.x;
         const dy = event.clientY - pointer.y;
         setPointer({ x: event.clientX, y: event.clientY });
         onPan({ x: pan.x + dx, y: pan.y + dy });
       }}
-      // Deliberately no onPointerLeave: the cursor leaves the picture to reach
-      // the Confirm button, and the point it last named is the point it meant.
+      // Panning ends the pointer's business; the point was named by the press
+      // that began it and is not renamed by the drag that followed.
       onPointerUp={() => setPointer(null)}
       onPointerCancel={() => setPointer(null)}
     >
@@ -648,7 +640,13 @@ function Picture({
         alt="Robot City, crowded with figures"
         // max-* rather than a fixed size, so the picture is scaled down to fit
         // whatever the viewport is and its own proportions are kept at every one.
-        className="max-h-full max-w-full"
+        // The crosshair lives on the picture, not on the container, so naming a
+        // point reads as naming a point, and stepping off the picture to reach
+        // Confirm puts the ordinary cursor back — with no leave handler to
+        // forget to write. Only at 1x, where the whole picture is where you
+        // name a point; zoomed in, the whole picture is a drag handle and the
+        // crosshair drawn on it already says where the point is.
+        className={`max-h-full max-w-full ${aim && zoom === 1 ? "cursor-crosshair" : ""}`}
         style={{
           // Scaling the picture rather than resizing it keeps it at full
           // resolution when zoomed, and back to fitting the viewport at 1x. The
@@ -713,23 +711,6 @@ function Picture({
       )}
     </div>
   );
-}
-
-/**
- * Where a click lands on the picture as a fraction of the picture itself
- * (ADR-0002), or null when it landed on the black beside it. The letterbox is
- * not a place a character can be, so it is not a place a guess can be made.
- */
-function onPicture(
-  clickX: number,
-  clickY: number,
-  image: HTMLImageElement | null,
-): Point | null {
-  if (!image) return null;
-  const point = pointOnPicture(clickX, clickY, image.getBoundingClientRect());
-  return point && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1
-    ? point
-    : null;
 }
 
 /** How long the round has been running, measured from the start time the server

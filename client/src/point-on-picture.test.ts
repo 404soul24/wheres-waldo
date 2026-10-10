@@ -33,3 +33,17 @@ test("a picture with no area has no fraction to divide by", () => {
   expect(pointOnPicture(10, 10, { x: 0, y: 0, width: 0, height: 500 })).toBeNull();
   expect(pointOnPicture(10, 10, { x: 0, y: 0, width: 1000, height: 0 })).toBeNull();
 });
+
+test("a press on the black beside the picture names no point", () => {
+  // The letterbox is not a place a character can be, so a press there is not a
+  // place a guess can be made either.
+  expect(pointOnPicture(-1, 250, at1x)).toBeNull();
+  expect(pointOnPicture(500, -1, at1x)).toBeNull();
+  expect(pointOnPicture(1001, 250, at1x)).toBeNull();
+  expect(pointOnPicture(500, 501, at1x)).toBeNull();
+});
+
+test("the corners of the picture are still on it", () => {
+  expect(pointOnPicture(0, 500, at1x)).toEqual({ x: 0, y: 1 });
+  expect(pointOnPicture(1000, 0, at1x)).toEqual({ x: 1, y: 0 });
+});

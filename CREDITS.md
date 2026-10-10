@@ -2,7 +2,7 @@
 
 ## Artwork
 
-**Robot City** by [Egor Klyuchnyk](https://egorklyuchnyk.com) ([ArtStation](https://www.artstation.com/egorklyuchnyk)).
+**Robot City** by [Egor Klyuchnyk](https://chekavo.artstation.com/) ([ArtStation](https://chekavo.artstation.com/)).
 
 **No redistribution permission has been obtained from the artist.** The image was
 retrieved from the artist's published work; attribution is not permission. This

@@ -1,3 +1,5 @@
+import type { Point, RenderedPicture } from "./point-on-picture.ts";
+
 /** A point on the page, in CSS pixels measured from the top left of the window. */
 export type ScreenPoint = { x: number; y: number };
 
@@ -7,6 +9,22 @@ export type Box = { width: number; height: number };
 /** How far the picker keeps clear of the point it is anchored to, so the
  * character under the cursor stays visible beside it. */
 const GAP = 8;
+
+/**
+ * Where a point on the picture is on the page as the picture is drawn right
+ * now, and so where the picker opens beside it.
+ *
+ * The point is a fraction of the picture (ADR-0002) and the picture is a box, so
+ * the anchor is worked out from the box rather than remembered: zooming and
+ * panning move the picture under the point without moving the point off the
+ * character, and the picker stays the same eight-pixel hop away at every zoom.
+ */
+export function anchorOn(picture: RenderedPicture, point: Point): ScreenPoint {
+  return {
+    x: picture.x + point.x * picture.width,
+    y: picture.y + point.y * picture.height,
+  };
+}
 
 /**
  * Where a picker of a known size should sit so that it opens beside the point
