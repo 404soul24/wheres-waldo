@@ -1,0 +1,15 @@
+# Railway deploys this from the repository root. The client is built here and
+# served by the server process, so the game is one process on one port with no
+# cross-origin surface — see `server/src/app.ts`.
+
+[build]
+builder = "RAILPACK"
+
+[deploy]
+# The server applies the schema (and the six characters) before it starts
+# listening, so traffic never arrives at a database that is not ready.
+startCommand = "npm run start"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

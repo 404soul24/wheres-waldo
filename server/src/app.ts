@@ -1,5 +1,8 @@
 import cookieParser from "cookie-parser";
 import express from "express";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type pg from "pg";
 
 import { parseGuess } from "./guess.ts";
@@ -205,10 +208,45 @@ async function storeTag(
 /** The one thing a Tag must not be, said once so both requests say it alike. */
 const BAD_TAG = `A tag is between 1 and ${TAG_MAX} characters.`;
 
+/**
+ * The built client, served from the same process as the API.
+ *
+ * One process on one port, so there is no second host, no CORS and no cookie
+ * that has to cross an origin to work. The client is addressed with paths the
+ * browser has never seen before ("/score", a refresh mid-round), so anything the
+ * API has not claimed falls through to the page, which reads the route itself.
+ */
+const CLIENT_DIST = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "client",
+  "dist",
+);
+
+/**
+ * A year, for the files whose names carry a hash of their own contents. The name
+ * changes whenever the bytes do, so a cached copy can never be stale — which is
+ * exactly the promise Express's default (no caching at all) refuses to make.
+ */
+const FINGERPRINTED = { maxAge: "1y", immutable: true };
+
 export function createApp(pool: pg.Pool) {
   const app = express();
   app.use(express.json());
   app.use(cookieParser(sessionSecret()));
+
+  /** Whether the database answers, for the platform's health check. A plain GET,
+   *  because that is what a health check is: it must not need a session, and a
+   *  green light on an unreachable database is worse than a red one. */
+  app.get("/api/health", async (_req, res) => {
+    try {
+      await pool.query("SELECT 1");
+      res.json({ ok: true });
+    } catch {
+      res.status(503).json({ ok: false });
+    }
+  });
 
   // A GET, and so readable by anyone with no session at all: arriving at the
   // page is not a decision to play, so it neither starts a session nor a round.
@@ -393,6 +431,44 @@ export function createApp(pool: pg.Pool) {
         you: row.session_id === sessionId,
       })),
       yours: yours ? { elapsedMs: yours.elapsed_ms } : null,
+    });
+  });
+
+  // An address under /api that no route claimed is a mistake worth naming, not
+  // a page: answering it with the HTML shell would turn a typo in a fetch into a
+  // silent parse failure in the browser.
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ error: "No such thing here." });
+  });
+
+  // Vite writes the hashed JS and CSS into assets/ and copies everything else —
+  // the picture, the font, the favicon — to the root of dist. Those copies keep
+  // their own names, so they are cached briefly rather than forever: a deploy
+  // that changes the picture should be picked up without anyone clearing a cache.
+  //
+  // `index: false` on the second one, because index.html is the file that names
+  // the current hashed assets: served from here for GET /, it would carry an
+  // hour's cache and a deploy would 404 every player on the new bundles. The
+  // fallback below sends it uncached instead, and this leaves it to that.
+  app.use("/assets", express.static(join(CLIENT_DIST, "assets"), FINGERPRINTED));
+  app.use(express.static(CLIENT_DIST, { index: false, maxAge: "1h" }));
+
+  if (!existsSync(join(CLIENT_DIST, "index.html"))) {
+    console.warn(`No client build at ${CLIENT_DIST}; serving the API only.`);
+  }
+
+  // Everything else is the game itself. The client is one page with no router of
+  // its own, so there is nothing to route on — but a refresh mid-round, a
+  // bookmark, or a stray path must still land on the page that can ask the
+  // server what happened, rather than on Express's "Cannot POST /x" page.
+  //
+  // Every method, not just GET: a HEAD or POST to an unknown address is still an
+  // address the game owns, and answering it with an error page is the one thing
+  // this exists to prevent.
+  app.use((_req, res, next) => {
+    res.setHeader("cache-control", "no-cache");
+    res.sendFile(join(CLIENT_DIST, "index.html"), (err) => {
+      if (err) next(err);
     });
   });
 

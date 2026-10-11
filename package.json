@@ -7,9 +7,12 @@
     "client"
   ],
   "scripts": {
+    "build": "npm run build --workspace client",
+    "start": "npm run start --workspace server",
+    "e2e": "node e2e.mjs",
     "dev": "npm run dev --workspace client",
     "dev:server": "npm run dev --workspace server",
-    "test": "npm run test --workspaces --if-present",
+    "test": "npm run build && npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   }
 }
