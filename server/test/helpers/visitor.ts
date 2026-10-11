@@ -1,6 +1,17 @@
 import type pg from "pg";
 
-export type Character = { name: string; found: boolean };
+/** A Character as the browser is told about it: a name, whether this round has
+ *  found it, and its target box as fractions of the picture (ADR-0002). The box
+ *  is sent so the browser can crop a portrait out of the picture already on
+ *  screen — see ADR-0003. */
+export type Character = {
+  name: string;
+  found: boolean;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
 
 export type Round = {
   id: string;
@@ -9,7 +20,11 @@ export type Round = {
   elapsedMs: number | null;
 };
 
-export type StartResponse = { round: Round; characters: Character[] };
+export type StartResponse = {
+  round: Round;
+  characters: Character[];
+  tag: string | null;
+};
 
 export type GuessResponse = {
   hit: boolean;
@@ -83,6 +98,7 @@ export function visitor(baseUrl: string, pool: pg.Pool) {
 export type Leaderboard = {
   entries: {
     session: string;
+    tag: string | null;
     elapsedMs: number;
     finishedAt: string;
     you: boolean;

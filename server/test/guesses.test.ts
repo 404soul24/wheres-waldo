@@ -6,6 +6,7 @@ import type pg from "pg";
 import { createApp } from "../src/app.ts";
 import { databaseUrl } from "../src/db.ts";
 import { freshTestPool, resetRoundData } from "./helpers/database.ts";
+import { CHARACTERS } from "./helpers/visitor.ts";
 
 process.env.SESSION_SECRET ??= "test-secret-not-used-in-production";
 process.env.NODE_ENV = "test";
@@ -145,13 +146,25 @@ describe("POST /api/guesses", () => {
     assert.deepEqual(found, [SPIKE, LEMKIN]);
   });
 
-  it("never echoes a target box back to the browser", async () => {
+  it("still answers a guess with the whole state, boxes and all", async () => {
+    // Boxes reach the browser deliberately now (ADR-0003), but a guess is still
+    // answered with every character's state rather than just the one guessed at.
     const guess = await started();
     const { x, y } = await centreOf(WANDA);
 
     const { body } = await guess({ name: WANDA, x, y });
 
-    assert.doesNotMatch(JSON.stringify(body), /"x"|"y"|"w"|"h"/);
+    assert.deepEqual(
+      body.characters.map((c) => [c.name, c.found]),
+      [
+        [WANDA, true],
+        [CHARACTERS[1], false],
+        [CHARACTERS[2], false],
+        [CHARACTERS[3], false],
+        [CHARACTERS[4], false],
+        [CHARACTERS[5], false],
+      ],
+    );
   });
 
   it("refuses a point outside 0-1 rather than clamping it", async () => {

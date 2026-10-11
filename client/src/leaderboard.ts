@@ -1,5 +1,8 @@
 export type Entry = {
   session: string;
+  /** The display name this session plays under, or null if it never chose one.
+   *  Nobody's name is verified and nobody's is required. */
+  tag: string | null;
   elapsedMs: number;
   finishedAt: string;
   you: boolean;

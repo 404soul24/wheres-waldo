@@ -9,8 +9,23 @@ import { anchorOn, pickerPosition } from "./picker-position.ts";
 import type { ScreenPoint } from "./picker-position.ts";
 import { pointOnPicture } from "./point-on-picture.ts";
 import type { Point, RenderedPicture } from "./point-on-picture.ts";
+import { portraitCrop } from "./portrait.ts";
 
-type Character = { name: string; found: boolean };
+/**
+ * A Character as the server describes it: a name, whether this round has found
+ * it, and its Target box in fractions of the picture (ADR-0002). The box is here
+ * so a portrait can be cut out of the picture already on screen, rather than
+ * carrying a second picture per character that could disagree with this one
+ * (ADR-0003).
+ */
+type Character = {
+  name: string;
+  found: boolean;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
 type Round = {
   id: string;
   startedAt: string;
@@ -23,7 +38,19 @@ type GuessResponse = {
   round?: Round;
   error?: string;
 };
-type StartResponse = { round: Round; characters: Character[] };
+
+/** What the server says about this session: a round or none, the characters,
+ *  and the tag the session plays under. */
+type Status = { round: Round | null; characters: Character[]; tag: string | null };
+
+/** Where the picture lives. Also where the portraits are cut from, which is why
+ *  it is named rather than written into the markup. */
+const PICTURE = "/img/robot-city.jpg";
+
+/** How long a tag may be. The server says the same number in its own tag.ts and
+ *  refuses anything longer whatever this browser allows, so this copy is only
+ *  there to stop the keyboard letting a player type a tag that will be refused. */
+const TAG_MAX = 16;
 
 /**
  * The picture's own box on the page: the very same measurement as
@@ -51,24 +78,58 @@ const AIM_PX = 28;
 const MIDDLE: Point = { x: 0.5, y: 0.5 };
 
 /**
- * The round this session is playing. Arriving at the page and asking for
- * another round are the same request, told apart by what the player meant:
- * without `again` the server hands back the round already under way, and with
- * it a new one, started now, with nothing found.
+ * Arriving at the page asks whether this session has a round yet, and starts
+ * nothing. Reading the briefing must not cost the player seconds of a clock
+ * they never agreed to start (ADR-0001).
  */
-async function fetchRound(again: boolean): Promise<StartResponse> {
+async function arriveAt(): Promise<Status> {
+  const response = await fetch("/api/rounds/current");
+  if (!response.ok) throw new Error();
+  return response.json() as Promise<Status>;
+}
+
+/**
+ * Asking for a round. Without a tag it resumes the round already under way; a
+ * tag is only sent when the player has just chosen one, because playing again
+ * says nothing about the name and must not quietly clear it.
+ */
+async function fetchRound(again: boolean, tag?: string): Promise<Status> {
   const response = await fetch("/api/rounds", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(again ? { restart: true } : {}),
+    body: JSON.stringify({
+      ...(again ? { restart: true } : {}),
+      ...(tag === undefined ? {} : { tag }),
+    }),
   });
   if (!response.ok) throw new Error();
-  return response.json() as Promise<StartResponse>;
+  return response.json() as Promise<Status>;
+}
+
+/**
+ * Renaming a session, and what the server decided it is now called. The stored
+ * tag is the answer rather than what was asked for, so the client never shows a
+ * tag the server did not accept.
+ */
+async function saveTag(tag: string): Promise<string> {
+  const response = await fetch("/api/session", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tag }),
+  });
+  if (!response.ok) throw new Error();
+  return ((await response.json()) as { tag: string }).tag;
 }
 
 export default function App() {
   const [round, setRound] = useState<Round | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
+  const [tag, setTag] = useState<string | null>(null);
+  // The briefing, opened by hand. Before the first round there is nothing else
+  // to be doing, so it is simply always up; after that it is a courtesy and can
+  // be put away. One flag either way, rather than a phase to keep in step.
+  const [briefing, setBriefing] = useState(false);
+  const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [found, setFound] = useState<string | null>(null);
@@ -87,6 +148,9 @@ export default function App() {
   // The board's own failure, not the app's: a leaderboard that will not load is
   // no reason to throw away a round already under way.
   const [boardError, setBoardError] = useState<string | null>(null);
+  // A rejected tag is kept apart from the board's load error, so it does not
+  // replace the whole table: the scores are still true and only the name failed.
+  const [tagError, setTagError] = useState<string | null>(null);
 
   const list = useRef<HTMLElement>(null);
   const area = useRef<HTMLDivElement>(null);
@@ -96,35 +160,47 @@ export default function App() {
   // a double click on Confirm is two guesses, not one.
   const inFlight = useRef(false);
 
-  // Resuming is the same request as starting: the server returns the round this
-  // session already has, started when it first arrived, found characters and
-  // all. Nothing here keeps a start time of its own (ADR-0001).
-  const adopt = useCallback((next: StartResponse) => {
-    setRound(next.round);
+  // Taking on whatever the server says this session is playing. A round that is
+  // not there yet is not an error: it is the briefing being owed, and the
+  // characters come back anyway because the briefing is where they are read.
+  const adopt = useCallback((next: Status) => {
+    setReady(true);
     setCharacters(next.characters);
+    setTag(next.tag);
+    if (!next.round) return;
+    setRound(next.round);
     // Markers are keyed by round, so a new round reads none and starts clean.
     setMarkers(readMarkers(next.round.id));
   }, []);
 
   useEffect(() => {
-    fetchRound(false)
+    arriveAt()
       .then(adopt)
-      .catch(() => setError("We could not start your round. Please reload."));
+      .catch(() => setError("We could not reach the server. Please reload."));
   }, [adopt]);
 
   // Asked for each time the board is opened, so it is the record as it stands
   // rather than as it stood when the round ended. The error is cleared by the
   // button that opens the board, not here: an effect that clears state it is
   // about to set anyway just costs a second render.
-  useEffect(() => {
-    if (view !== "board") return;
-    fetch("/api/leaderboard")
+  const loadBoard = useCallback(() => {
+    return fetch("/api/leaderboard")
       .then((res) => (res.ok ? res.json() : Promise.reject()))
-      .then((body: Board) => setBoard(body))
+      .then((body: Board) => {
+        // A board that has loaded says so, whatever went wrong last time it
+        // did not.
+        setBoardError(null);
+        setBoard(body);
+      })
       .catch(() =>
         setBoardError("We could not load the leaderboard. Please try again."),
       );
-  }, [view]);
+  }, []);
+
+  useEffect(() => {
+    if (view !== "board") return;
+    void loadBoard();
+  }, [view, loadBoard]);
 
   // A Marker stays for the rest of the round, and the round outlives a reload:
   // the server hands back the same round, already part-found. The server keeps
@@ -253,7 +329,18 @@ export default function App() {
   }
 
   if (error) return <p className="p-8 text-alert">{error}</p>;
-  if (!round) return <p className="p-8">Loading the picture…</p>;
+  if (!ready) return <p className="p-8">Loading the picture…</p>;
+
+  // No round yet means the briefing is what this player is owed, and it is the
+  // only thing on screen until they say go: the round is not created until they
+  // do, so nothing here is being timed.
+  if (!round) {
+    return (
+      <div className="bg-screen text-paper">
+        <Briefing characters={characters} tag={tag} busy={busy} onBegin={begin} />
+      </div>
+    );
+  }
 
   const remaining = characters.filter((c) => !c.found);
   // The whole picture at once, twice, or four times over. 4x is what makes the
@@ -264,6 +351,51 @@ export default function App() {
   // tick on this screen believed a moment ago, this is the number that was
   // written down (ADR-0001).
   const score = formatElapsed(round.elapsedMs ?? 0);
+
+  /**
+   * Starting a round is what the briefing's button does, and the clock begins
+   * here rather than on arrival: nobody is charged for reading the instructions
+   * (ADR-0001). The tag goes with it, because this is the moment the player
+   * chose one.
+   */
+  async function begin(chosenTag: string) {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      await adopt(await fetchRound(false, chosenTag));
+    } catch {
+      setFailed("We could not start your round. Please try again.");
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Renaming changes the tag beside every score this session has ever set and
+   * nothing else: no round is created, none is touched, and no clock moves.
+   *
+   * It reports whether it worked, because the row it was typed into must go
+   * back to showing the tag that is actually stored. A board that quietly kept
+   * a rejected tag on screen would be telling the player a name they do not
+   * have.
+   */
+  async function retag(next: string): Promise<boolean> {
+    if (inFlight.current) return false;
+    inFlight.current = true;
+    try {
+      setTag(await saveTag(next));
+      setTagError(null);
+      await loadBoard();
+      return true;
+    } catch {
+      setTagError("We could not save that tag.");
+      return false;
+    } finally {
+      inFlight.current = false;
+    }
+  }
 
   /**
    * Starting again is the same request that loaded the page, saying so: the
@@ -307,6 +439,13 @@ export default function App() {
         <button
           type="button"
           className="rounded border border-beam/50 px-3 py-1 hover:border-beam hover:text-beam"
+          onClick={() => setBriefing(true)}
+        >
+          How to play
+        </button>
+        <button
+          type="button"
+          className="rounded border border-beam/50 px-3 py-1 hover:border-beam hover:text-beam"
           onClick={() => {
             setBoardError(null);
             setView(view === "board" ? "play" : "board");
@@ -328,7 +467,12 @@ export default function App() {
       </p>
 
       {view === "board" ? (
-        <Leaderboard board={board} error={boardError} />
+        <Leaderboard
+          board={board}
+          error={boardError}
+          tagError={tagError}
+          onRetag={retag}
+        />
       ) : (
       <main className="flex min-h-0 flex-1 flex-col sm:flex-row">
         <aside ref={list} className="w-full shrink-0 overflow-x-auto border-b border-beam/40 p-4 sm:w-48 sm:overflow-y-auto sm:border-b-0 sm:border-r">
@@ -399,6 +543,16 @@ export default function App() {
       </main>
       )}
 
+      {briefing && (
+        <Briefing
+          characters={characters}
+          tag={tag}
+          busy={busy}
+          onBegin={begin}
+          onClose={() => setBriefing(false)}
+        />
+      )}
+
       {round.finishedAt && view === "play" && (
         // Shown when the round ends, and again on any return to a round that is
         // already over, because the score belongs to the round rather than to
@@ -464,6 +618,168 @@ export default function App() {
 }
 
 /**
+ * The picture itself, loaded once and shared by every portrait. The page's own
+ * <img> is a different element doing a different job; this one exists so six
+ * portraits can be cut from the same pixels without six more requests.
+ */
+let pictureOnce: Promise<HTMLImageElement> | null = null;
+function loadPicture(): Promise<HTMLImageElement> {
+  return (pictureOnce ??= new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("The picture did not load."));
+    image.src = PICTURE;
+  }));
+}
+
+/**
+ * One character, cut out of the picture.
+ *
+ * The portrait is the picture itself, zoomed to that character's Target box —
+ * so it cannot show a face that has drifted from where the character actually
+ * is, and there is no second artwork to keep in step (ADR-0003). The name is
+ * always beside it in the markup, so the canvas itself says nothing to a screen
+ * reader.
+ */
+function Portrait({ character }: { character: Character }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const { x, y, w, h } = character;
+
+  useEffect(() => {
+    let still = true;
+    loadPicture()
+      .then((image) => {
+        const target = canvas.current;
+        if (!still || !target) return;
+        const { sx, sy, size } = portraitCrop(
+          { x, y, w, h },
+          { width: image.naturalWidth, height: image.naturalHeight },
+        );
+        target.width = size;
+        target.height = size;
+        target.getContext("2d")?.drawImage(image, sx, sy, size, size, 0, 0, size, size);
+      })
+      // A portrait that could not be cut leaves the name beside it, which is
+      // still the thing a player is looking for. Nothing here is worth an error.
+      .catch(() => {});
+    return () => {
+      still = false;
+    };
+  }, [x, y, w, h]);
+
+  return (
+    <canvas
+      ref={canvas}
+      aria-hidden="true"
+      className="h-12 w-12 shrink-0 border border-beam/50 bg-screen object-cover"
+      style={{ imageRendering: "pixelated" }}
+    />
+  );
+}
+
+/**
+ * What the player is shown before their first round, and on request afterwards:
+ * the six Characters with a face each, the tag they will appear under on the
+ * board, and the one button that starts the clock. On the first visit there is
+ * nothing behind it and no way past it — the round does not exist yet. Opened
+ * later it is read-only, with the tag left where it is and a Close instead.
+ */
+function Briefing({
+  characters,
+  tag,
+  busy,
+  onBegin,
+  onClose,
+}: {
+  characters: Character[];
+  tag: string | null;
+  busy: boolean;
+  onBegin: (tag: string) => void;
+  onClose?: () => void;
+}) {
+  const [draft, setDraft] = useState(tag ?? "");
+  // A briefing with no way out is the first visit: the round does not exist
+  // until the player presses go, so there is nothing behind it to go back to.
+  // One that can be closed is the courtesy re-opening, and it asks for nothing.
+  const firstVisit = !onClose;
+
+  return (
+    <div
+      className={
+        firstVisit
+          ? "grid min-h-svh place-items-center p-4"
+          : "fixed inset-0 z-30 grid place-items-center bg-screen/90 p-4"
+      }
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="briefing-heading"
+        className="w-full max-w-lg overflow-y-auto rounded border border-beam bg-screen p-6 shadow-xl"
+      >
+        <h2 id="briefing-heading" className="text-lg font-bold text-beam">
+          Robot City
+        </h2>
+        <p className="mt-2 text-sm text-beam/70">
+          Six characters are hiding in this picture. Name one, then click where
+          you can see them. {firstVisit ? "The clock starts when you press go." : ""}
+        </p>
+
+        <ul className="mt-5 grid list-none grid-cols-1 gap-3 sm:grid-cols-2">
+          {characters.map((character) => (
+            <li key={character.name} className="flex items-center gap-3">
+              <Portrait character={character} />
+              <span className="text-sm">{character.name}</span>
+            </li>
+          ))}
+        </ul>
+
+        {firstVisit ? (
+          <form
+            className="mt-5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (draft.trim() !== "") onBegin(draft);
+            }}
+          >
+            <label htmlFor="briefing-tag" className="text-sm text-beam/70">
+              Your tag, as it will appear on the leaderboard
+            </label>
+            <input
+              id="briefing-tag"
+              value={draft}
+              // The same bound the server enforces, so the keyboard will not let
+              // a player type a tag the server would then refuse a round for.
+              maxLength={TAG_MAX}
+              required
+              autoFocus
+              onChange={(event) => setDraft(event.target.value)}
+              className="mt-1 w-full rounded border border-beam/60 bg-screen px-3 py-2"
+            />
+            <button
+              type="submit"
+              disabled={busy || draft.trim() === ""}
+              className="mt-4 w-full rounded bg-beam px-3 py-2 font-bold text-screen hover:bg-paper disabled:opacity-50"
+            >
+              {busy ? "Starting…" : "Go"}
+            </button>
+          </form>
+        ) : (
+          <button
+            type="button"
+            autoFocus
+            onClick={onClose}
+            className="mt-6 w-full rounded border border-beam/60 px-3 py-2 hover:border-beam hover:text-beam"
+          >
+            Close
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * The picture is somebody else's work, and the app says so where the player is
  * rather than in a repository file they will never open. Attribution is not a
  * licence to redistribute, and the credit says exactly that.
@@ -493,9 +809,13 @@ function Credit() {
 function Leaderboard({
   board,
   error,
+  tagError,
+  onRetag,
 }: {
   board: Board | null;
   error: string | null;
+  tagError: string | null;
+  onRetag: (tag: string) => Promise<boolean>;
 }) {
   if (error) return <p role="alert" className="p-8 text-alert">{error}</p>;
   if (!board) return <p className="p-8">Loading the leaderboard…</p>;
@@ -505,11 +825,13 @@ function Leaderboard({
     <main className="min-h-0 flex-1 overflow-y-auto p-4">
       <h2 className="text-lg font-bold text-beam">The ten fastest rounds</h2>
       {note && <p className="mt-2 text-sm text-beam/70">{note}</p>}
+      {tagError && <p role="alert" className="mt-2 text-sm text-alert">{tagError}</p>}
       {board.entries.length > 0 && (
         <table className="mt-4 w-full max-w-lg text-sm">
           <thead>
             <tr className="text-left text-beam/70">
               <th className="py-1 pr-4 font-normal">#</th>
+              <th className="py-1 pr-4 font-normal">Tag</th>
               <th className="py-1 pr-4 font-normal">Time</th>
               <th className="py-1 font-normal">Finished</th>
             </tr>
@@ -529,6 +851,39 @@ function Leaderboard({
                 <td className="py-1 pr-4 tabular-nums">
                   {index + 1}
                   {entry.you && <span className="ml-2 text-xs">You</span>}
+                </td>
+                <td className="py-1 pr-4">
+                  {entry.you ? (
+                    // Only ever your own row, and it changes nothing but the tag
+                    // beside it: no round is touched and no clock moves. A tag
+                    // the server refuses puts the stored one back, rather than
+                    // leaving the row claiming a name nobody has.
+                    <input
+                      aria-label="Your tag"
+                      defaultValue={entry.tag ?? ""}
+                      maxLength={TAG_MAX}
+                      onBlur={async (event) => {
+                        const field = event.target;
+                        const wanted = field.value.trim();
+                        if (wanted === (entry.tag ?? "")) return;
+                        if (wanted === "") {
+                          field.value = entry.tag ?? "";
+                          return;
+                        }
+                        if (!(await onRetag(wanted))) {
+                          field.value = entry.tag ?? "";
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                      }}
+                      className="w-full max-w-32 rounded border border-transparent bg-transparent px-1 py-0.5 hover:border-beam/50 focus:border-beam"
+                    />
+                  ) : (
+                    // A dash rather than a blank cell, so an untagged session
+                    // reads as a deliberate absence and not as a broken column.
+                    <span className="text-beam/50">{entry.tag ?? "—"}</span>
+                  )}
                 </td>
                 <td className="py-1 pr-4 tabular-nums">{formatElapsed(entry.elapsedMs)}</td>
                 <td className="py-1 tabular-nums">
@@ -636,7 +991,7 @@ function Picture({
     >
       <img
         ref={image}
-        src="/img/robot-city.jpg"
+        src={PICTURE}
         alt="Robot City, crowded with figures"
         // max-* rather than a fixed size, so the picture is scaled down to fit
         // whatever the viewport is and its own proportions are kept at every one.

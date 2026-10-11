@@ -4,6 +4,7 @@ import type pg from "pg";
 
 import { parseGuess } from "./guess.ts";
 import { claimedSession, sessionSecret, startSession } from "./session.ts";
+import { parseTag, TAG_MAX } from "./tag.ts";
 import { isInside, type TargetBox } from "./target-box.ts";
 
 type RoundRow = {
@@ -16,24 +17,36 @@ type RoundRow = {
 type CharacterRow = {
   name: string;
   found: boolean;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 };
 
 type LeaderboardRow = {
   session_id: string;
+  tag: string | null;
   elapsed_ms: number;
   finished_at: Date;
 };
 
 type YourRow = { elapsed_ms: number };
 
-/** Every Character, with whether this round has found it. Where none are is
- * never sent: the target boxes stay on the server. */
+/** Every Character, with whether this round has found it, and its Target box.
+ *
+ *  The box is sent so the browser can crop a portrait out of the picture the
+ *  player is already looking at, rather than carrying a second set of artwork
+ *  that could drift from the first. That makes the boxes readable in devtools,
+ *  and the browser could already have read them off the picture anyway: there is
+ *  nothing here the player does not already have. Round is nullable — with no
+ *  round there is no find, so every character comes back unfound.
+ */
 async function characters(
   pool: pg.Pool,
-  roundId: string,
+  roundId: string | null,
 ): Promise<CharacterRow[]> {
   const { rows } = await pool.query<CharacterRow>(
-    `SELECT t.name, (f.target_id IS NOT NULL) AS found
+    `SELECT t.name, (f.target_id IS NOT NULL) AS found, t.x, t.y, t.w, t.h
        FROM targets t
        LEFT JOIN finds f ON f.target_id = t.id AND f.round_id = $1
       ORDER BY t.id`,
@@ -101,14 +114,18 @@ const RESUME_OR_NEW = `WITH newest AS (
  * times is one entry on a board, not twenty — and the outer ORDER BY puts those
  * sessions in score order afterwards. Only rounds with both a finish and a
  * score are ranked, so an abandoned round never appears. A session is named by
- * its own opaque id and nothing else: the table holds no name, no address and
- * nothing about who anyone is.
+ * its own opaque id and, if it chose one, the tag the player typed: the table
+ * holds no address and nothing about who anyone is, and a Tag is a name and
+ * nothing more (GLOSSARY.md). The tag is read here, at the one moment it is
+ * shown, rather than copied onto the round when it was scored — it belongs to
+ * the Session, so retagging a session retags every score it ever set (ADR-0004).
  */
-const LEADERBOARD = `SELECT session_id, elapsed_ms, finished_at FROM (
-    SELECT DISTINCT ON (session_id) session_id, elapsed_ms, finished_at
-      FROM rounds
-     WHERE finished_at IS NOT NULL AND elapsed_ms IS NOT NULL
-     ORDER BY session_id, elapsed_ms, finished_at
+const LEADERBOARD = `SELECT session_id, tag, elapsed_ms, finished_at FROM (
+    SELECT DISTINCT ON (r.session_id) r.session_id, s.tag, r.elapsed_ms, r.finished_at
+      FROM rounds r
+      JOIN sessions s ON s.id = r.session_id
+     WHERE r.finished_at IS NOT NULL AND r.elapsed_ms IS NOT NULL
+     ORDER BY r.session_id, r.elapsed_ms, r.finished_at
   ) AS best
   ORDER BY elapsed_ms, finished_at
   LIMIT 10`;
@@ -145,30 +162,131 @@ const FINISH_IF_COMPLETE = `UPDATE rounds
    )
  RETURNING id, started_at, finished_at, elapsed_ms`;
 
+/** The round this session is playing, if it has one. Reads and never writes: the
+ *  question "is there a round yet?" is what decides whether the player is met
+ *  with the briefing, and asking it must not answer it by starting one. */
+const CURRENT_ROUND = `SELECT id, started_at, finished_at, elapsed_ms
+  FROM rounds WHERE session_id = $1
+ ORDER BY started_at DESC LIMIT 1`;
+
+/** The Tag a Session plays under, or null if it has never chosen one.
+ *
+ * The Tag belongs to the Session and not to a Round (ADR-0004): the board keeps
+ * a Session's best score and throws the rest away, so the tag shown beside that
+ * score has to be the Session's own, not one Round's. */
+async function currentTag(pool: pg.Pool, sessionId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ tag: string | null }>(
+    "SELECT tag FROM sessions WHERE id = $1",
+    [sessionId],
+  );
+  return rows[0]?.tag ?? null;
+}
+
+/**
+ * Write a Tag onto a Session and hand back what is now stored.
+ *
+ * One place, because a Session's tag is written from two requests — the one
+ * that starts a round and the one that retags a player — and they must not be
+ * able to drift apart. Returning the stored tag rather than the one asked for
+ * means no caller has to guess what the database made of it.
+ */
+async function storeTag(
+  pool: pg.Pool,
+  sessionId: string,
+  tag: string,
+): Promise<string | null> {
+  const { rows, rowCount } = await pool.query<{ tag: string | null }>(
+    "UPDATE sessions SET tag = $2 WHERE id = $1 RETURNING tag",
+    [sessionId, tag],
+  );
+  return rowCount === 0 ? null : rows[0]!.tag;
+}
+
+/** The one thing a Tag must not be, said once so both requests say it alike. */
+const BAD_TAG = `A tag is between 1 and ${TAG_MAX} characters.`;
+
 export function createApp(pool: pg.Pool) {
   const app = express();
   app.use(express.json());
   app.use(cookieParser(sessionSecret()));
 
+  // A GET, and so readable by anyone with no session at all: arriving at the
+  // page is not a decision to play, so it neither starts a session nor a round.
+  // A null round means the briefing is what this player is owed; the characters
+  // come back regardless, because the briefing is where they are read.
+  app.get("/api/rounds/current", async (req, res) => {
+    const sessionId = claimedSession(req);
+    const { rows } = sessionId
+      ? await pool.query<RoundRow>(CURRENT_ROUND, [sessionId])
+      : { rows: [] };
+    const round = rows[0];
+
+    res.json({
+      round: round ? asRound(round) : null,
+      characters: await characters(pool, round?.id ?? null),
+      tag: sessionId ? await currentTag(pool, sessionId) : null,
+    });
+  });
+
+  // Renaming is not starting anything: the round under way keeps its clock and
+  // its score, and only the Tag beside it changes. Refused without a Session,
+  // because there is nobody to rename.
+  app.patch("/api/session", async (req, res) => {
+    const sessionId = claimedSession(req);
+    if (!sessionId) {
+      res.status(401).json({ error: "No session to rename." });
+      return;
+    }
+    const tag = parseTag((req.body as { tag?: unknown } | undefined)?.tag);
+    if (!tag) {
+      res.status(400).json({ error: BAD_TAG });
+      return;
+    }
+
+    const stored = await storeTag(pool, sessionId, tag);
+    if (stored === null) {
+      res.status(401).json({ error: "No session to rename." });
+      return;
+    }
+
+    res.json({ tag: stored });
+  });
+
   app.post("/api/rounds", async (req, res) => {
+    const body = (req.body as
+      | { restart?: unknown; tag?: unknown }
+      | undefined) ?? {};
+
+    // A tag sent and a tag refused are different things, so they are told apart
+    // before anything is written: a round is not started for a tag the server
+    // will not store, rather than started and then half-applied.
+    const sentTag = "tag" in body ? parseTag(body.tag) : null;
+    if ("tag" in body && sentTag === null) {
+      res.status(400).json({ error: BAD_TAG });
+      return;
+    }
+
     const sessionId = claimedSession(req) ?? startSession(res);
 
     await pool.query(
       "INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING",
       [sessionId],
     );
+    const tag =
+      sentTag === null
+        ? await currentTag(pool, sessionId)
+        : await storeTag(pool, sessionId, sentTag);
 
     // The same request resumes a round and starts the next one. What tells them
-  // apart is the player's intent, not the shape of the round: arriving at the
-  // page wants the round already under way, and pressing "play again" wants a
-  // new one. Anything but an exact `true` is not a request to start one.
-  const again =
-    (req.body as { restart?: unknown } | undefined)?.restart === true;
-  const { rows } = await pool.query<RoundRow>(
-    again ? NEW_ROUND : RESUME_OR_NEW,
-    [sessionId],
-  );
-  const round = rows[0]!;
+    // apart is the player's intent, not the shape of the round: asking for a
+    // round wants the one already under way, and pressing "play again" wants a
+    // new one. Anything but an exact `true` is not a request to start one.
+    const again = body.restart === true;
+    const { rows } = await pool.query<RoundRow>(
+      again ? NEW_ROUND : RESUME_OR_NEW,
+      [sessionId],
+    );
+    const round = rows[0]!;
 
     // A round whose last character has been found is over, even if the request
     // that found it never got to say so: recording the find and finishing the
@@ -184,6 +302,7 @@ export function createApp(pool: pg.Pool) {
     res.json({
       round: asRound(finishedRound),
       characters: await characters(pool, finishedRound.id),
+      tag,
     });
   });
 
@@ -268,6 +387,7 @@ export function createApp(pool: pg.Pool) {
     res.json({
       entries: rows.map((row) => ({
         session: row.session_id,
+        tag: row.tag,
         elapsedMs: row.elapsed_ms,
         finishedAt: row.finished_at.toISOString(),
         you: row.session_id === sessionId,

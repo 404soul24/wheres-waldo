@@ -3,6 +3,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- The display name this session presents on the leaderboard (GLOSSARY.md).
+-- Optional: a session that has never chosen one still plays, and shows up
+-- unnamed. Not an identity — nothing here is verified. The bound is the same one
+-- src/tag.ts applies, said again here so the invariant holds however the row was
+-- written; the two must be changed together.
+--
+-- An ALTER rather than a column in the CREATE above, because CREATE TABLE IF NOT
+-- EXISTS is a no-op against a table that already exists, and this has to reach
+-- the databases that were made before the tag did.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tag TEXT
+  CHECK (tag IS NULL OR length(tag) BETWEEN 1 AND 16);
+
 -- A session plays more than one round: finishing one offers a new one. What is
 -- unique is the round in progress, and it is the database rather than the
 -- application that says so, for the same reason the old UNIQUE (session_id) did:

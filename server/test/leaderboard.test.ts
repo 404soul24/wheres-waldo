@@ -38,9 +38,12 @@ function stranger() {
 }
 
 /** A finished round worth `ms`, played by a session that only exists to hold it. */
-async function score(ms: number) {
+async function score(ms: number, tag?: string) {
   const session = randomUUID();
-  await pool.query("INSERT INTO sessions (id) VALUES ($1)", [session]);
+  await pool.query("INSERT INTO sessions (id, tag) VALUES ($1, $2)", [
+    session,
+    tag ?? null,
+  ]);
   await pool.query(
     `INSERT INTO rounds (session_id, finished_at, elapsed_ms)
      VALUES ($1, now(), $2)`,
@@ -169,15 +172,45 @@ describe("the leaderboard", () => {
   });
 
   it("tells nobody who anyone is", async () => {
-    await score(12_000);
+    await score(12_000, "Ada");
 
     const { body } = await stranger();
 
     assert.deepEqual(
       Object.keys(body.entries[0]!).sort(),
-      ["elapsedMs", "finishedAt", "session", "you"],
-      "a score, when it was set, and an opaque handle: nothing else",
+      ["elapsedMs", "finishedAt", "session", "tag", "you"],
+      "a score, when it was set, the tag the player chose, and an opaque handle",
     );
+  });
+
+  it("shows each session's tag beside its score", async () => {
+    await score(20_000, "Ada");
+    await score(10_000, "Grace");
+
+    const { body } = await stranger();
+
+    assert.deepEqual(
+      body.entries.map((e) => e.tag),
+      ["Grace", "Ada"],
+      "each row carries the name its own session chose, in score order",
+    );
+  });
+
+  it("shows a session that never chose a tag as no name, rather than as a blank one", async () => {
+    await score(10_000);
+
+    const { body } = await stranger();
+
+    assert.equal(body.entries[0]!.tag, null);
+  });
+
+  it("shows the tag as it stands now, not as it stood when the score was set", async () => {
+    const session = await score(10_000, "Ada");
+    await pool.query("UPDATE sessions SET tag = 'Grace' WHERE id = $1", [session]);
+
+    const { body } = await stranger();
+
+    assert.equal(body.entries[0]!.tag, "Grace", "the tag belongs to the session, not the round");
   });
 
   it("counts a session that played twice over HTTP, once", async () => {

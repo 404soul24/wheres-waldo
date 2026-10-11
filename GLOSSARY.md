@@ -40,10 +40,14 @@ _Avoid_: Game, session, play, match
 An anonymous player's identity, established on first visit and remembered for 30 days. No account, no password, no email.
 _Avoid_: User, account, player, identity, cookie
 
+**Tag**:
+The display name a Session presents on the Leaderboard. Chosen by the player, editable at any time, and attached to the Session rather than to any single Round. Not an identity: nothing is verified, and two Sessions may share one.
+_Avoid_: Name, username, handle, alias, nickname, player name
+
 **Score**:
 How long the round took, in milliseconds. Lower is better. Computed from when the round started, never from what the player reports.
 _Avoid_: Time, duration, result, points
 
 **Leaderboard**:
-The ten fastest scores across all sessions, one row per session — a session's best score only, never its later ones. An anonymous session may appear once even after playing repeatedly.
+The ten fastest scores across all sessions, one row per session — a session's best score only, never its later ones. An anonymous session may appear once even after playing repeatedly. Each row carries the session's Tag; a session that never chose one shows without a name.
 _Avoid_: High scores, top ten, ranking, table

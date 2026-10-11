@@ -5,6 +5,7 @@ import type { Board, Entry } from "./leaderboard.ts";
 
 const entry = (over: Partial<Entry> = {}): Entry => ({
   session: "a-session",
+  tag: null,
   elapsedMs: 30_000,
   finishedAt: "2026-01-01T00:00:00.000Z",
   you: false,

@@ -116,6 +116,34 @@ describe("applying the schema and the characters", () => {
     );
   });
 
+  it("lets a session carry a tag, and keeps it to one a row can show", async () => {
+    const id = await newSession();
+
+    await pool.query("UPDATE sessions SET tag = $2 WHERE id = $1", [id, "Ada"]);
+    const { rows } = await pool.query("SELECT tag FROM sessions WHERE id = $1", [
+      id,
+    ]);
+    assert.equal(rows[0]!.tag, "Ada");
+
+    // The application checks a tag before it arrives; the database says the
+    // same thing anyway, so the invariant holds however the row was written.
+    await rejectsWithSqlState(CHECK_VIOLATION, () =>
+      pool.query("UPDATE sessions SET tag = $2 WHERE id = $1", [id, "a".repeat(17)]),
+    );
+    await rejectsWithSqlState(CHECK_VIOLATION, () =>
+      pool.query("UPDATE sessions SET tag = '' WHERE id = $1", [id]),
+    );
+  });
+
+  it("lets a session have no tag at all", async () => {
+    const id = await newSession();
+
+    const { rows } = await pool.query("SELECT tag FROM sessions WHERE id = $1", [
+      id,
+    ]);
+    assert.equal(rows[0]!.tag, null, "a tag is something the player chooses, not something they have");
+  });
+
   it("lets a session play again once its round is finished", async () => {
     const id = await newSession();
     await pool.query(

@@ -7,14 +7,10 @@ import { createApp } from "../src/app.ts";
 import { SESSION_COOKIE } from "../src/session.ts";
 import { databaseUrl } from "../src/db.ts";
 import { freshTestPool, resetRoundData } from "./helpers/database.ts";
+import type { StartResponse } from "./helpers/visitor.ts";
 
 process.env.SESSION_SECRET ??= "test-secret-not-used-in-production";
 process.env.NODE_ENV = "test";
-
-type StartResponse = {
-  round: { id: string; startedAt: string; finishedAt: string | null; elapsedMs: number | null };
-  characters: { name: string; found: boolean }[];
-};
 
 let pool: pg.Pool;
 let baseUrl: string;
@@ -83,17 +79,31 @@ describe("POST /api/rounds", () => {
     );
   });
 
-  it("never tells the browser where a character is", async () => {
+  it("tells the browser where each character is, so it can crop a portrait", async () => {
+    // This used to be the other way round, and reversing it was a decision
+    // rather than an oversight: the browser crops a portrait out of the picture
+    // the player is already looking at, rather than carrying a second set of
+    // artwork that could drift from the first. See ADR-0003.
     const { body } = await session()();
 
     for (const c of body.characters) {
       assert.deepEqual(
         Object.keys(c).sort(),
-        ["found", "name"],
-        `${c.name} is a name and a found flag, nothing else`,
+        ["found", "h", "name", "w", "x", "y"],
+        `${c.name} is a name, a found flag, and its box`,
       );
     }
-    assert.doesNotMatch(JSON.stringify(body), /"x"|"y"|"w"|"h"/);
+  });
+
+  it("still sends boxes as fractions of the picture, never pixels, per ADR-0002", async () => {
+    const { body } = await session()();
+
+    for (const c of body.characters) {
+      assert.ok(c.x >= 0 && c.x < 1, `${c.name} starts inside the picture`);
+      assert.ok(c.y >= 0 && c.y < 1, `${c.name} starts inside the picture`);
+      assert.ok(c.w > 0 && c.x + c.w <= 1, `${c.name} stays inside the picture`);
+      assert.ok(c.h > 0 && c.y + c.h <= 1, `${c.name} stays inside the picture`);
+    }
   });
 
   it("resumes the same round on a refresh, start time included", async () => {
