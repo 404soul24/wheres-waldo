@@ -1,9 +1,12 @@
-// One cold start played end to end over HTTP, against the real build served by
+﻿// One cold start played end to end over HTTP, against the real build served by
 // the real server in production mode. ponytail: a script, not a test suite —
-// the suite lives in server/test. Run it against a deployed URL too.
+// the suite lives in server/test. Set BASE to point it at a deployed game.
+//
+// It talks to nothing but the HTTP API: the target boxes come down with the
+// characters (ADR-0003), so a player could place these six guesses and so can
+// this, without a database connection the deployed database has no reason to
+// accept from outside its own network.
 const BASE = process.env.BASE ?? "http://127.0.0.1:3999";
-const DATABASE_URL = process.env.DATABASE_URL;
-const pg = (await import("pg")).default;
 
 const assert = (ok, what) => {
   if (!ok) throw new Error(`FAILED: ${what}`);
@@ -38,14 +41,13 @@ assert(
 );
 
 console.log("find every character");
-const pool = new pg.Pool({ connectionString: DATABASE_URL });
 let score;
 for (const c of started.body.characters) {
-  const { rows } = await pool.query(
-    "SELECT (x + w / 2) AS x, (y + h / 2) AS y FROM targets WHERE name = $1",
-    [c.name],
-  );
-  const g = await call("/api/guesses", { name: c.name, x: rows[0].x, y: rows[0].y });
+  const g = await call("/api/guesses", {
+    name: c.name,
+    x: c.x + c.w / 2,
+    y: c.y + c.h / 2,
+  });
   assert(g.body.hit === true, `found ${c.name}`);
   score = g.body.round;
 }
@@ -97,5 +99,4 @@ assert(
   "a cached index points at bundles the last deploy deleted",
 );
 
-await pool.end();
 console.log("\nplayed end to end from a cold start.");
