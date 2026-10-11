@@ -14,5 +14,8 @@
     "dev:server": "npm run dev --workspace server",
     "test": "npm run build && npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "railway": "3.11.0"
   }
 }
